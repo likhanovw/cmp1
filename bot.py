@@ -14,6 +14,9 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     InlineKeyboardButton,
     BufferedInputFile,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardRemove,
 )
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +27,7 @@ from db import (
     AsyncSessionFactory,
     init_db,
     get_or_create_user,
+    get_user_by_telegram_id,
     get_balance,
     transfer,
     get_last_transactions,
@@ -70,6 +74,11 @@ class PayRequestStates(StatesGroup):
     waiting_for_amount = State()
 
 
+class RegistrationStates(StatesGroup):
+    waiting_for_contact = State()
+    waiting_for_nickname = State()
+
+
 def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="💸 Перевести", callback_data="menu_transfer")
@@ -90,6 +99,13 @@ def admin_menu_keyboard() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def registration_inline_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Регистрация", callback_data="register_start")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext) -> None:
     """
@@ -99,43 +115,140 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
     args = (message.text or "").split(maxsplit=1)
     token = args[1].strip() if len(args) == 2 else ""
 
+    await state.clear()
+    async with session_scope() as session:
+        user = await get_user_by_telegram_id(session, message.from_user.id)
+        # обновим username, если пользователь уже есть
+        if user and message.from_user.username is not None and user.username != message.from_user.username:
+            user.username = message.from_user.username
+            await session.commit()
+
+    # Если пользователь не зарегистрирован — предлагаем регистрацию
+    if not user or not user.is_registered:
+        await message.answer(
+            "👋 Чтобы пользоваться ботом, нужно сначала зарегистрироваться.\n\n"
+            "Нажмите кнопку ниже, чтобы начать регистрацию.",
+            reply_markup=registration_inline_keyboard(),
+        )
+        return
+
     # Если есть токен — это переход по QR/deeplink с запросом платежа
     if token:
-        await state.clear()
-        async with session_scope() as session:
-            current_user = await get_or_create_user(
-                session,
-                telegram_id=message.from_user.id,
-                username=message.from_user.username,
-            )
-
         async with session_scope() as session:
             pr = await get_valid_payment_request(session, token)
             if not pr:
                 await message.answer("❌ Этот запрос на перевод недействителен или истёк.")
                 return
 
-            await state.update_data(request_token=token)
-            await state.set_state(PayRequestStates.waiting_for_amount)
+        await state.update_data(request_token=token)
+        await state.set_state(PayRequestStates.waiting_for_amount)
 
         await message.answer(
             "Вы открыли запрос на получение средств.\n"
-            "Введите сумму, которую хотите перевести получателю:"
+            "Введите сумму, которую хотите перевести получателю:",
         )
         return
 
     # Обычный старт без токена — показ главного меню и баланса
-    await state.clear()
     async with session_scope() as session:
-        user = await get_or_create_user(
-            session,
-            telegram_id=message.from_user.id,
-            username=message.from_user.username,
-        )
-        balance = await get_balance(session, user)
+        # user здесь точно есть и зарегистрирован
+        user = await get_user_by_telegram_id(session, message.from_user.id)
+        balance = await get_balance(session, user)  # type: ignore[arg-type]
 
     title = "👑 Режим: Админ\n" if user.is_admin else ""
 
+    await message.answer(
+        f"💰 Баланс: <b>{balance:.2f} ₽</b>\n{title}",
+        reply_markup=main_menu_keyboard(user.is_admin),
+    )
+
+
+@router.callback_query(F.data == "register_start")
+async def on_register_start(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="Поделиться", request_contact=True)],
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
+    await state.set_state(RegistrationStates.waiting_for_contact)
+    await callback.message.answer(
+        "Для регистрации поделитесь, пожалуйста, своим Telegram-контактом.\n"
+        "Нажмите кнопку «Поделиться» ниже.",
+        reply_markup=kb,
+    )
+    await callback.answer()
+
+
+@router.message(RegistrationStates.waiting_for_contact)
+async def on_register_contact(message: Message, state: FSMContext) -> None:
+    contact = message.contact
+    if contact is None:
+        await message.answer(
+            "❌ Мне не пришёл контакт.\n"
+            "Пожалуйста, используйте кнопку «Поделиться» под полем ввода.",
+        )
+        return
+
+    # Защита: принимаем только собственный контакт пользователя
+    if contact.user_id and contact.user_id != message.from_user.id:
+        await message.answer(
+            "❌ Нужно поделиться именно своим контактом.",
+        )
+        return
+
+    username = message.from_user.username or contact.first_name or ""
+    await state.update_data(username=username)
+    await state.set_state(RegistrationStates.waiting_for_nickname)
+
+    await message.answer(
+        "Отлично! Теперь напишите ваш игровой ник.\n"
+        "Это имя будут видеть другие пользователи.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
+
+@router.message(RegistrationStates.waiting_for_nickname)
+async def on_register_nickname(message: Message, state: FSMContext) -> None:
+    nickname = (message.text or "").strip()
+    if not nickname:
+        await message.answer("❌ Ник не может быть пустым. Введите, пожалуйста, ваш игровой ник.")
+        return
+
+    data = await state.get_data()
+    username = data.get("username") or message.from_user.username
+
+    async with session_scope() as session:
+        user = await get_user_by_telegram_id(session, message.from_user.id)
+        if user:
+            user.username = username
+            user.game_nickname = nickname
+            user.is_registered = True
+            # если это супер-админ — не потеряем флаг
+            if settings.super_admin_id == message.from_user.id:
+                user.is_admin = True
+            await session.commit()
+        else:
+            user = User(
+                telegram_id=message.from_user.id,
+                username=username,
+                game_nickname=nickname,
+                is_registered=True,
+                is_admin=settings.super_admin_id == message.from_user.id,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+
+        balance = await get_balance(session, user)  # type: ignore[arg-type]
+
+    await state.clear()
+    title = "👑 Режим: Админ\n" if user.is_admin else ""
+    await message.answer(
+        "✅ Регистрация завершена! Теперь вы можете пользоваться ботом.",
+    )
     await message.answer(
         f"💰 Баланс: <b>{balance:.2f} ₽</b>\n{title}",
         reply_markup=main_menu_keyboard(user.is_admin),

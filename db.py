@@ -37,6 +37,8 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    game_nickname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_registered: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     balance: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -46,8 +48,14 @@ class Transaction(Base):
     __tablename__ = "transactions"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    from_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
-    to_user_id: Mapped[Optional[int]] = mapped_column(ForeignKey("users.id"), nullable=True)
+    from_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    to_user_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
     amount: Mapped[float] = mapped_column(Numeric(18, 2))
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     type: Mapped[str] = mapped_column(String(50))  # transfer, admin_credit, admin_debit
@@ -62,7 +70,9 @@ class PaymentRequest(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     token: Mapped[str] = mapped_column(String(128), unique=True, index=True)
-    requester_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    requester_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"),
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     used: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -79,15 +89,22 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
 
+async def get_user_by_telegram_id(
+    session: AsyncSession,
+    telegram_id: int,
+) -> Optional[User]:
+    result = await session.execute(
+        select(User).where(User.telegram_id == telegram_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_or_create_user(
     session: AsyncSession,
     telegram_id: int,
     username: Optional[str],
 ) -> User:
-    result = await session.execute(
-        select(User).where(User.telegram_id == telegram_id)
-    )
-    user = result.scalar_one_or_none()
+    user = await get_user_by_telegram_id(session, telegram_id)
     if user:
         # обновим username, если поменялся
         if username is not None and user.username != username:
