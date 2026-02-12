@@ -59,11 +59,6 @@ async def session_scope() -> AsyncSession:
         await session.close()
 
 
-class TransferStates(StatesGroup):
-    waiting_for_recipient = State()
-    waiting_for_amount = State()
-
-
 class AdminAdjustStates(StatesGroup):
     waiting_for_target = State()
     waiting_for_amount = State()
@@ -81,7 +76,6 @@ class RegistrationStates(StatesGroup):
 
 def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
-    kb.button(text="💸 Перевести", callback_data="menu_transfer")
     kb.button(text="📥 Запросить средства", callback_data="menu_request")
     kb.button(text="📋 История", callback_data="menu_history")
     if is_admin:
@@ -250,7 +244,9 @@ async def on_register_nickname(message: Message, state: FSMContext) -> None:
         "✅ Регистрация завершена! Теперь вы можете пользоваться ботом.",
     )
     await message.answer(
-        f"💰 Баланс: <b>{balance:.2f} ₽</b>\n{title}",
+        f"👤 Игровое имя: <b>{user.game_nickname}</b>\n"
+        f"💰 Баланс: <b>{balance:.2f} ₽</b>\n"
+        f"{title}",
         reply_markup=main_menu_keyboard(user.is_admin),
     )
 
@@ -289,93 +285,6 @@ async def on_menu_history(callback: CallbackQuery) -> None:
         reply_markup=main_menu_keyboard(is_admin=user.is_admin),
     )
     await callback.answer()
-
-
-@router.callback_query(F.data == "menu_transfer")
-async def on_menu_transfer(callback: CallbackQuery, state: FSMContext) -> None:
-    await state.set_state(TransferStates.waiting_for_recipient)
-    await callback.message.edit_text(
-        "Введите @username или ID получателя:",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")]
-            ]
-        ),
-    )
-    await callback.answer()
-
-
-async def resolve_user_by_text(session: AsyncSession, text: str) -> Optional[User]:
-    # Попытка как ID
-    text = text.strip()
-    if text.startswith("@"):
-        username = text[1:]
-        result = await session.execute(
-            select(User).where(User.username == username)
-        )
-        return result.scalar_one_or_none()
-    if text.isdigit():
-        tg_id = int(text)
-        result = await session.execute(
-            select(User).where(User.telegram_id == tg_id)
-        )
-        return result.scalar_one_or_none()
-    return None
-
-
-@router.message(TransferStates.waiting_for_recipient)
-async def on_transfer_recipient(message: Message, state: FSMContext) -> None:
-    async with session_scope() as session:
-        target = await resolve_user_by_text(session, message.text or "")
-
-    if not target:
-        await message.answer("❌ Пользователь не найден. Отправьте @username или ID ещё раз.")
-        return
-
-    await state.update_data(recipient_id=target.telegram_id)
-    await state.set_state(TransferStates.waiting_for_amount)
-    await message.answer("Введите сумму перевода в ₽ (например, 100.50):")
-
-
-@router.message(TransferStates.waiting_for_amount)
-async def on_transfer_amount(message: Message, state: FSMContext) -> None:
-    try:
-        amount = float(message.text.replace(",", "."))
-    except Exception:
-        await message.answer("❌ Некорректная сумма. Попробуйте ещё раз.")
-        return
-
-    if amount <= 0:
-        await message.answer("❌ Сумма должна быть больше 0.")
-        return
-
-    data = await state.get_data()
-    recipient_tg_id = data.get("recipient_id")
-    async with session_scope() as session:
-        sender = await get_or_create_user(
-            session, telegram_id=message.from_user.id, username=message.from_user.username
-        )
-        result = await session.execute(
-            select(User).where(User.telegram_id == recipient_tg_id)
-        )
-        recipient = result.scalar_one_or_none()
-        if not recipient:
-            await message.answer("❌ Получатель больше не существует.")
-            await state.clear()
-            return
-
-        ok = await transfer(session, sender, recipient, amount)
-
-    if not ok:
-        balance = await get_balance(session, sender)  # type: ignore[name-defined]
-        await message.answer(
-            f"❌ Недостаточно средств. Ваш баланс: {balance:.2f} ₽"
-        )
-    else:
-        await message.answer(
-            f"✅ Перевод выполнен! С вашего счёта списано {amount:.2f} ₽"
-        )
-    await state.clear()
 
 
 @router.callback_query(F.data == "menu_request")
