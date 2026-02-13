@@ -38,6 +38,8 @@ class User(Base):
     telegram_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     game_nickname: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Храним в колонке camp_id, но в коде используем имя cmap_id
+    cmap_id: Mapped[Optional[str]] = mapped_column("camp_id", String(64), nullable=True)
     is_registered: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     balance: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
