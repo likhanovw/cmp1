@@ -75,6 +75,7 @@ class PaymentRequest(Base):
     requester_id: Mapped[int] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"),
     )
+    amount: Mapped[Optional[float]] = mapped_column(Numeric(18, 2), nullable=True)  # None = любая сумма
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     used: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -129,12 +130,14 @@ async def create_payment_request(
     session: AsyncSession,
     requester: User,
     token: str,
+    amount: Optional[float] = None,
 ) -> PaymentRequest:
     now = datetime.utcnow()
     expires_at = now + timedelta(minutes=settings.qr_expire_minutes)
     pr = PaymentRequest(
         token=token,
         requester_id=requester.id,
+        amount=amount,
         created_at=now,
         expires_at=expires_at,
         used=False,
