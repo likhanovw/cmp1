@@ -124,6 +124,13 @@ def pay_confirm_keyboard() -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def main_menu_button_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="Главное меню", callback_data="menu_back")
+    kb.adjust(1)
+    return kb.as_markup()
+
+
 @router.message(CommandStart())
 async def cmd_start(
     message: Message,
@@ -445,6 +452,8 @@ async def on_pay_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         ok = await transfer(session, sender, recipient, amount)
         if ok:
             await mark_payment_request_used(session, pr)
+        recipient_tg_id = recipient.telegram_id
+        sender_name = sender.game_nickname or sender.username or f"ID{sender.telegram_id}"
 
     await state.clear()
     if not ok:
@@ -470,6 +479,24 @@ async def on_pay_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         f"💰 Баланс: <b>{balance:.2f} ₽</b>",
         reply_markup=main_menu_keyboard(is_admin=False),
     )
+
+    # Уведомление получателю (кто запрашивал)
+    async with session_scope() as session:
+        rec = await get_user_by_telegram_id(session, recipient_tg_id)
+        rec_balance = await get_balance(session, rec) if rec else 0
+    try:
+        await bot.send_message(
+            chat_id=recipient_tg_id,
+            text=(
+                f"💸 <b>Перевод по вашему запросу</b>\n\n"
+                f"Перевод от: <b>{sender_name}</b>\n"
+                f"Сумма: <b>{amount:.2f} ₽</b>\n"
+                f"Общий баланс: <b>{rec_balance:.2f} ₽</b>"
+            ),
+            reply_markup=main_menu_button_keyboard(),
+        )
+    except Exception:
+        pass
 
 
 @router.callback_query(F.data == "pay_cancel")
@@ -523,6 +550,8 @@ async def on_pay_request_amount(message: Message, state: FSMContext) -> None:
         ok = await transfer(session, sender, recipient, amount)
         if ok:
             await mark_payment_request_used(session, pr)
+        recipient_tg_id = recipient.telegram_id
+        sender_name = sender.game_nickname or sender.username or f"ID{sender.telegram_id}"
 
     if not ok:
         async with session_scope() as session:
@@ -539,6 +568,23 @@ async def on_pay_request_amount(message: Message, state: FSMContext) -> None:
         await message.answer(
             f"✅ Перевод выполнен! С вашего счёта списано {amount:.2f} ₽"
         )
+        # Уведомление получателю (кто запрашивал)
+        async with session_scope() as session:
+            rec = await get_user_by_telegram_id(session, recipient_tg_id)
+            rec_balance = await get_balance(session, rec) if rec else 0
+        try:
+            await bot.send_message(
+                chat_id=recipient_tg_id,
+                text=(
+                    f"💸 <b>Перевод по вашему запросу</b>\n\n"
+                    f"Перевод от: <b>{sender_name}</b>\n"
+                    f"Сумма: <b>{amount:.2f} ₽</b>\n"
+                    f"Общий баланс: <b>{rec_balance:.2f} ₽</b>"
+                ),
+                reply_markup=main_menu_button_keyboard(),
+            )
+        except Exception:
+            pass
 
     await state.clear()
 
