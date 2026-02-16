@@ -91,6 +91,17 @@ def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     return kb.as_markup()
 
 
+def main_menu_text(user, balance: float) -> str:
+    """Текст главного меню: игровое имя, игровой номер, баланс."""
+    nickname = (user.game_nickname or "—") if user else "—"
+    camp_id = (user.cmap_id or "—") if user else "—"
+    return (
+        f"👤 Игровое имя: <b>{nickname}</b>\n"
+        f"🎯 Игровой номер: <b>{camp_id}</b>\n"
+        f"💰 Баланс: <b>{balance:.2f} ₽</b>"
+    )
+
+
 # def admin_menu_keyboard() -> InlineKeyboardMarkup:
 #     kb = InlineKeyboardBuilder()
 #     kb.button(text="➕ Начислить валюту", callback_data="admin_credit")
@@ -198,10 +209,11 @@ async def cmd_start(
             return
 
         # Запрос без суммы: просим ввести сумму
+        requester_name = requester.game_nickname or requester.username or f"ID{requester.telegram_id}"
         await state.update_data(request_token=token)
         await state.set_state(PayRequestStates.waiting_for_amount)
         await message.answer(
-            "Вы открыли запрос на получение средств.\n"
+            f"💸 Запрос от <b>{requester_name}</b>.\n\n"
             "Введите сумму, которую хотите перевести получателю:",
         )
         return
@@ -215,7 +227,7 @@ async def cmd_start(
     # title = "👑 Режим: Админ\n" if user.is_admin else ""
 
     await message.answer(
-        f"💰 Баланс: <b>{balance:.2f} ₽</b>",
+        main_menu_text(user, balance),
         reply_markup=main_menu_keyboard(is_admin=False),
     )
 
@@ -324,9 +336,7 @@ async def on_register_cmap_id(message: Message, state: FSMContext) -> None:
         "✅ Регистрация завершена! Теперь вы можете пользоваться ботом.",
     )
     await message.answer(
-        f"👤 Игровое имя: <b>{user.game_nickname}</b>\n"
-        f"🎯 Игровой номер: <b>{user.cmap_id}</b>\n"
-        f"💰 Баланс: <b>{balance:.2f} ₽</b>",
+        main_menu_text(user, balance),
         reply_markup=main_menu_keyboard(is_admin=False),
     )
 
@@ -408,6 +418,7 @@ async def on_request_specific_amount(message: Message, state: FSMContext) -> Non
         )
         token = generate_request_token()
         await create_payment_request(session, user, token, amount=amount)
+        balance = await get_balance(session, user)  # type: ignore[arg-type]
 
     deep_link = f"https://t.me/{(await bot.me()).username}?start={token}"
     png_bytes = generate_qr_png(deep_link)
@@ -419,7 +430,10 @@ async def on_request_specific_amount(message: Message, state: FSMContext) -> Non
     )
     await message.answer_photo(photo=photo, caption=caption)
     await state.clear()
-    await message.answer("Готово. Ожидайте перевода.", reply_markup=main_menu_keyboard(is_admin=False))
+    await message.answer(
+        "Готово. Ожидайте перевода.\n\n" + main_menu_text(user, balance),
+        reply_markup=main_menu_keyboard(is_admin=False),
+    )
 
 
 @router.callback_query(F.data == "pay_confirm")
@@ -476,7 +490,7 @@ async def on_pay_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.message.edit_text(f"✅ Переведено {amount:.2f} ₽ получателю.")
     await callback.answer()
     await callback.message.answer(
-        f"💰 Баланс: <b>{balance:.2f} ₽</b>",
+        main_menu_text(sender, balance),
         reply_markup=main_menu_keyboard(is_admin=False),
     )
 
@@ -552,6 +566,8 @@ async def on_pay_request_amount(message: Message, state: FSMContext) -> None:
             await mark_payment_request_used(session, pr)
         recipient_tg_id = recipient.telegram_id
         sender_name = sender.game_nickname or sender.username or f"ID{sender.telegram_id}"
+        recipient_name = recipient.game_nickname or recipient.username or f"ID{recipient.telegram_id}"
+        sender_balance = await get_balance(session, sender) if ok else 0
 
     if not ok:
         async with session_scope() as session:
@@ -566,7 +582,10 @@ async def on_pay_request_amount(message: Message, state: FSMContext) -> None:
         )
     else:
         await message.answer(
-            f"✅ Перевод выполнен! С вашего счёта списано {amount:.2f} ₽"
+            "✅ Перевод выполнен!\n\n"
+            f"Кому: <b>{recipient_name}</b>\n"
+            f"Сколько: <b>{amount:.2f} ₽</b>\n"
+            f"Текущий баланс: <b>{sender_balance:.2f} ₽</b>"
         )
         # Уведомление получателю (кто запрашивал)
         async with session_scope() as session:
