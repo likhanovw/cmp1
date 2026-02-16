@@ -29,6 +29,7 @@ from db import (
     init_db,
     get_or_create_user,
     get_user_by_telegram_id,
+    get_user_by_game_nickname,
     get_balance,
     transfer,
     get_last_transactions,
@@ -61,11 +62,9 @@ async def session_scope() -> AsyncSession:
         await session.close()
 
 
-# --- Админ-панель (временно отключена) ---
-# class AdminAdjustStates(StatesGroup):
-#     waiting_for_target = State()
-#     waiting_for_amount = State()
-#     waiting_for_confirm = State()
+class AdminStates(StatesGroup):
+    waiting_player = State()
+    waiting_amount = State()
 
 
 class PayRequestStates(StatesGroup):
@@ -87,9 +86,8 @@ def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📥 Запросить средства", callback_data="menu_request")
     kb.button(text="📋 История", callback_data="menu_history")
-    # Админ-панель временно отключена
-    # if is_admin:
-    #     kb.button(text="⚙️ Админ-панель", callback_data="menu_admin")
+    if is_admin:
+        kb.button(text="⚙️ Админ-панель", callback_data="menu_admin")
     kb.adjust(1)
     return kb.as_markup()
 
@@ -115,13 +113,13 @@ def _format_tx_time(dt: datetime) -> str:
     return dt.strftime("%d.%m.%Y %H:%M")
 
 
-# def admin_menu_keyboard() -> InlineKeyboardMarkup:
-#     kb = InlineKeyboardBuilder()
-#     kb.button(text="➕ Начислить валюту", callback_data="admin_credit")
-#     kb.button(text="➖ Списать валюту", callback_data="admin_debit")
-#     kb.button(text="◀️ Назад", callback_data="admin_back")
-#     kb.adjust(1)
-#     return kb.as_markup()
+def admin_menu_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardBuilder()
+    kb.button(text="➕ Начислить", callback_data="admin_credit")
+    kb.button(text="➖ Списать", callback_data="admin_debit")
+    kb.button(text="◀️ Назад", callback_data="admin_back")
+    kb.adjust(1)
+    return kb.as_markup()
 
 
 def registration_inline_keyboard() -> InlineKeyboardMarkup:
@@ -241,7 +239,7 @@ async def cmd_start(
 
     await message.answer(
         main_menu_text(user, balance),
-        reply_markup=main_menu_keyboard(is_admin=False),
+        reply_markup=main_menu_keyboard(is_admin=user.is_admin),
     )
 
 
@@ -350,7 +348,7 @@ async def on_register_cmap_id(message: Message, state: FSMContext) -> None:
     )
     await message.answer(
         main_menu_text(user, balance),
-        reply_markup=main_menu_keyboard(is_admin=False),
+        reply_markup=main_menu_keyboard(is_admin=user.is_admin),
     )
 
 
@@ -495,7 +493,7 @@ async def on_request_specific_amount(message: Message, state: FSMContext) -> Non
     await state.clear()
     await message.answer(
         "Готово. Ожидайте перевода.\n\n" + main_menu_text(user, balance),
-        reply_markup=main_menu_keyboard(is_admin=False),
+        reply_markup=main_menu_keyboard(is_admin=user.is_admin),
     )
 
 
@@ -560,7 +558,7 @@ async def on_pay_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
     await callback.message.answer(
         main_menu_text(sender, balance),
-        reply_markup=main_menu_keyboard(is_admin=False),
+        reply_markup=main_menu_keyboard(is_admin=sender.is_admin),
     )
 
     # Уведомление получателю (кто запрашивал)
@@ -658,7 +656,7 @@ async def on_pay_request_amount(message: Message, state: FSMContext) -> None:
         )
         await message.answer(
             main_menu_text(sender, sender_balance),
-            reply_markup=main_menu_keyboard(is_admin=False),
+            reply_markup=main_menu_keyboard(is_admin=sender.is_admin),
         )
         # Уведомление получателю (кто запрашивал)
         async with session_scope() as session:
@@ -682,9 +680,193 @@ async def on_pay_request_amount(message: Message, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "menu_admin")
-async def on_menu_admin(callback: CallbackQuery) -> None:
-    await callback.answer("Админ-панель временно недоступна.", show_alert=True)
+async def on_menu_admin(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    async with session_scope() as session:
+        user = await get_user_by_telegram_id(session, callback.from_user.id)
+        if not user or not user.is_admin:
+            await callback.answer("Доступ запрещён.", show_alert=True)
+            return
+    await callback.message.edit_text(
+        "⚙️ <b>Админ-панель</b>\n\nНачислить или списать средства игроку:",
+        reply_markup=admin_menu_keyboard(),
+    )
+    await callback.answer()
 
+
+@router.callback_query(F.data == "admin_credit")
+async def on_admin_credit(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(AdminStates.waiting_player)
+    await state.update_data(admin_action="credit")
+    await callback.message.edit_text(
+        "➕ <b>Начисление</b>\n\n"
+        "Введите <b>игровое имя</b> (никнейм) игрока:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data="admin_back")]
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_debit")
+async def on_admin_debit(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    await state.set_state(AdminStates.waiting_player)
+    await state.update_data(admin_action="debit")
+    await callback.message.edit_text(
+        "➖ <b>Списание</b>\n\n"
+        "Введите <b>игровое имя</b> (никнейм) игрока:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data="admin_back")]
+            ]
+        ),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "admin_back")
+async def on_admin_back(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    async with session_scope() as session:
+        user = await get_user_by_telegram_id(session, callback.from_user.id)
+        if not user or not user.is_registered:
+            await callback.message.edit_text(
+                "👋 Чтобы пользоваться ботом, нужно сначала зарегистрироваться.",
+                reply_markup=registration_inline_keyboard(),
+            )
+        else:
+            balance = await get_balance(session, user)  # type: ignore[arg-type]
+            await callback.message.edit_text(
+                main_menu_text(user, balance),
+                reply_markup=main_menu_keyboard(is_admin=user.is_admin),
+            )
+    await callback.answer()
+
+
+@router.message(AdminStates.waiting_player, F.text)
+async def on_admin_player_input(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Введите игровое имя (никнейм).")
+        return
+    async with session_scope() as session:
+        admin = await get_user_by_telegram_id(session, message.from_user.id)
+        if not admin or not admin.is_admin:
+            await state.clear()
+            await message.answer("Доступ запрещён.")
+            return
+        target = await get_user_by_game_nickname(session, raw)
+        if not target:
+            await message.answer(
+                "❌ Игрок не найден. Проверьте игровое имя."
+            )
+            return
+        if not target.is_registered:
+            await message.answer(
+                "❌ Этот пользователь ещё не завершил регистрацию."
+            )
+            return
+        target_id = target.id
+        target_name = _user_display_name(target)
+    await state.set_state(AdminStates.waiting_amount)
+    await state.update_data(admin_target_user_id=target_id, admin_target_name=target_name)
+    await message.answer(
+        f"Игрок: <b>{target_name}</b>\n\nВведите сумму в ₽:",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Отмена", callback_data="admin_back")]
+            ]
+        ),
+    )
+
+
+@router.message(AdminStates.waiting_amount, F.text)
+async def on_admin_amount_input(message: Message, state: FSMContext) -> None:
+    try:
+        amount = float((message.text or "").replace(",", "."))
+    except Exception:
+        await message.answer("❌ Введите число, например: 100 или 50.5")
+        return
+    if amount <= 0:
+        await message.answer("❌ Сумма должна быть больше 0.")
+        return
+    data = await state.get_data()
+    action = data.get("admin_action")
+    target_name = data.get("admin_target_name", "?")
+    await state.update_data(admin_amount=amount)
+    if action == "credit":
+        text = f"➕ Начислить <b>{amount:.2f} ₽</b> игроку <b>{target_name}</b>?"
+    else:
+        text = f"➖ Списать <b>{amount:.2f} ₽</b> у игрока <b>{target_name}</b>?"
+    await message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Подтвердить", callback_data="admin_confirm_yes"),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="admin_back"),
+                ]
+            ]
+        ),
+    )
+
+
+@router.callback_query(F.data == "admin_confirm_yes")
+async def on_admin_confirm_yes(callback: CallbackQuery, state: FSMContext) -> None:
+    data = await state.get_data()
+    target_user_id = data.get("admin_target_user_id")
+    amount = data.get("admin_amount")
+    action = data.get("admin_action")
+    if target_user_id is None or amount is None or action not in ("credit", "debit"):
+        await callback.answer("Сессия истекла. Начните заново.", show_alert=True)
+        await state.clear()
+        return
+    async with session_scope() as session:
+        admin = await get_user_by_telegram_id(session, callback.from_user.id)
+        if not admin or not admin.is_admin:
+            await callback.answer("Доступ запрещён.", show_alert=True)
+            await state.clear()
+            return
+        target = await session.get(User, target_user_id)
+        if not target:
+            await callback.answer("Игрок не найден.", show_alert=True)
+            await state.clear()
+            return
+        is_credit = action == "credit"
+        if not is_credit:
+            balance = await get_balance(session, target)
+            if balance < amount:
+                await callback.answer(
+                    f"Недостаточно средств у игрока. Баланс: {balance:.2f} ₽",
+                    show_alert=True,
+                )
+                return
+        await admin_adjust_balance(
+            session,
+            admin,
+            target,
+            amount,
+            is_credit=is_credit,
+        )
+        target_name = _user_display_name(target)
+    await state.clear()
+    if action == "credit":
+        await callback.message.edit_text(
+            f"✅ Начислено <b>{amount:.2f} ₽</b> игроку <b>{target_name}</b>."
+        )
+    else:
+        await callback.message.edit_text(
+            f"✅ Списано <b>{amount:.2f} ₽</b> у игрока <b>{target_name}</b>."
+        )
+    await callback.message.answer(
+        "Админ-панель:",
+        reply_markup=admin_menu_keyboard(),
+    )
+    await callback.answer()
 
 
 async def main() -> None:

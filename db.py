@@ -102,6 +102,26 @@ async def get_user_by_telegram_id(
     return result.scalar_one_or_none()
 
 
+async def get_user_by_camp_id(
+    session: AsyncSession,
+    camp_id: str,
+) -> Optional[User]:
+    result = await session.execute(
+        select(User).where(User.cmap_id == camp_id.strip())
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_user_by_game_nickname(
+    session: AsyncSession,
+    game_nickname: str,
+) -> Optional[User]:
+    result = await session.execute(
+        select(User).where(User.game_nickname == game_nickname.strip())
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_or_create_user(
     session: AsyncSession,
     telegram_id: int,
