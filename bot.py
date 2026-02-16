@@ -468,6 +468,7 @@ async def on_pay_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             await mark_payment_request_used(session, pr)
         recipient_tg_id = recipient.telegram_id
         sender_name = sender.game_nickname or sender.username or f"ID{sender.telegram_id}"
+        recipient_name = recipient.game_nickname or recipient.username or f"ID{recipient.telegram_id}"
 
     await state.clear()
     if not ok:
@@ -487,7 +488,12 @@ async def on_pay_confirm(callback: CallbackQuery, state: FSMContext) -> None:
     async with session_scope() as session:
         sender = await get_user_by_telegram_id(session, callback.from_user.id)
         balance = await get_balance(session, sender) if sender else 0
-    await callback.message.edit_text(f"✅ Переведено {amount:.2f} ₽ получателю.")
+    await callback.message.edit_text(
+        "✅ Перевод выполнен!\n\n"
+        f"Кому: <b>{recipient_name}</b>\n"
+        f"Сколько: <b>{amount:.2f} ₽</b>\n"
+        f"Текущий баланс: <b>{balance:.2f} ₽</b>"
+    )
     await callback.answer()
     await callback.message.answer(
         main_menu_text(sender, balance),
@@ -586,6 +592,10 @@ async def on_pay_request_amount(message: Message, state: FSMContext) -> None:
             f"Кому: <b>{recipient_name}</b>\n"
             f"Сколько: <b>{amount:.2f} ₽</b>\n"
             f"Текущий баланс: <b>{sender_balance:.2f} ₽</b>"
+        )
+        await message.answer(
+            main_menu_text(sender, sender_balance),
+            reply_markup=main_menu_keyboard(is_admin=False),
         )
         # Уведомление получателю (кто запрашивал)
         async with session_scope() as session:
