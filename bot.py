@@ -1,5 +1,6 @@
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import Optional
 
 from aiogram import Bot, Dispatcher, F, Router
@@ -33,6 +34,7 @@ from db import (
     get_last_transactions,
     admin_adjust_balance,
     User,
+    Transaction,
     get_valid_payment_request,
     create_payment_request,
     mark_payment_request_used,
@@ -84,6 +86,7 @@ class RegistrationStates(StatesGroup):
 def main_menu_keyboard(is_admin: bool) -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="📥 Запросить средства", callback_data="menu_request")
+    kb.button(text="📋 История", callback_data="menu_history")
     # Админ-панель временно отключена
     # if is_admin:
     #     kb.button(text="⚙️ Админ-панель", callback_data="menu_admin")
@@ -100,6 +103,16 @@ def main_menu_text(user, balance: float) -> str:
         f"🎯 Игровой номер: <b>{camp_id}</b>\n"
         f"💰 Баланс: <b>{balance:.2f} ₽</b>"
     )
+
+
+def _user_display_name(user: Optional[User]) -> str:
+    if user is None:
+        return "—"
+    return user.game_nickname or user.username or f"ID{user.telegram_id}"
+
+
+def _format_tx_time(dt: datetime) -> str:
+    return dt.strftime("%d.%m.%Y %H:%M")
 
 
 # def admin_menu_keyboard() -> InlineKeyboardMarkup:
@@ -348,6 +361,56 @@ async def on_menu_back(callback: CallbackQuery, state: FSMContext) -> None:
         state,
         telegram_id=callback.from_user.id,
         username=callback.from_user.username,
+    )
+    await callback.answer()
+
+
+def _format_history_line(tx: Transaction, user_id: int) -> str:
+    """Одна строка истории: входящий/исходящий, контрагент, сумма, время."""
+    time_str = _format_tx_time(tx.created_at)
+    amount_str = f"<b>{float(tx.amount):.2f} ₽</b>"
+    if tx.to_user_id == user_id:
+        if tx.from_user_id is not None:
+            return f"📥 Входящий · от {_user_display_name(tx.from_user)} · {amount_str} · {time_str}"
+        if tx.type == "admin_credit":
+            return f"📥 Входящий · от Начисление · {amount_str} · {time_str}"
+        return f"📤 Исходящий · кому Списание · {amount_str} · {time_str}"
+    else:
+        counterpart = _user_display_name(tx.to_user) if tx.to_user_id else "Списание"
+        return f"📤 Исходящий · кому {counterpart} · {amount_str} · {time_str}"
+
+
+def history_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")]
+        ]
+    )
+
+
+@router.callback_query(F.data == "menu_history")
+async def on_menu_history(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    async with session_scope() as session:
+        user = await get_user_by_telegram_id(session, callback.from_user.id)
+        if not user:
+            await callback.message.edit_text(
+                "❌ Пользователь не найден.",
+                reply_markup=history_back_keyboard(),
+            )
+            await callback.answer()
+            return
+        transactions = await get_last_transactions(session, user, limit=20)
+    if not transactions:
+        text = "📋 <b>История операций</b>\n\nПока нет ни одной операции."
+    else:
+        lines = ["📋 <b>История операций</b>\n"]
+        for tx in transactions:
+            lines.append(_format_history_line(tx, user.id))
+        text = "\n\n".join(lines)
+    await callback.message.edit_text(
+        text,
+        reply_markup=history_back_keyboard(),
     )
     await callback.answer()
 

@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
     AsyncSession,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, selectinload
 
 from config import get_settings
 
@@ -240,10 +240,14 @@ async def admin_adjust_balance(
 async def get_last_transactions(
     session: AsyncSession,
     user: User,
-    limit: int = 10,
+    limit: int = 20,
 ) -> list[Transaction]:
     result = await session.execute(
         select(Transaction)
+        .options(
+            selectinload(Transaction.from_user),
+            selectinload(Transaction.to_user),
+        )
         .where(
             (Transaction.from_user_id == user.id)
             | (Transaction.to_user_id == user.id)
