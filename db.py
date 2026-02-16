@@ -13,6 +13,7 @@ from sqlalchemy import (
     Numeric,
     select,
     func,
+    text,
 )
 from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
@@ -41,9 +42,15 @@ class User(Base):
     # Храним в колонке camp_id, но в коде используем имя cmap_id
     cmap_id: Mapped[Optional[str]] = mapped_column("camp_id", String(64), nullable=True)
     is_registered: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False)  # мягкое удаление админом
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     balance: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    @property
+    def is_active(self) -> bool:
+        """Зарегистрирован и не удалён — может пользоваться ботом и попадать в списки."""
+        return bool(self.is_registered and not self.is_deleted)
 
 
 class Transaction(Base):
@@ -87,9 +94,19 @@ engine = create_async_engine(settings.db_url, echo=False, future=True)
 AsyncSessionFactory = async_sessionmaker(engine, expire_on_commit=False)
 
 
+def _add_is_deleted_column_if_missing(sync_conn) -> None:
+    """Миграция: добавить колонку is_deleted в users, если её ещё нет."""
+    cursor = sync_conn.execute(text("PRAGMA table_info(users)"))
+    rows = cursor.fetchall()
+    col_names = [row[1] for row in rows] if rows else []
+    if "is_deleted" not in col_names:
+        sync_conn.execute(text("ALTER TABLE users ADD COLUMN is_deleted BOOLEAN DEFAULT 0"))
+
+
 async def init_db() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_add_is_deleted_column_if_missing)
 
 
 async def get_user_by_telegram_id(
@@ -115,11 +132,27 @@ async def get_user_by_camp_id(
 async def get_user_by_game_nickname(
     session: AsyncSession,
     game_nickname: str,
+    only_active: bool = True,
 ) -> Optional[User]:
-    result = await session.execute(
-        select(User).where(User.game_nickname == game_nickname.strip())
-    )
+    q = select(User).where(User.game_nickname == game_nickname.strip())
+    if only_active:
+        q = q.where(User.is_registered.is_(True), User.is_deleted.is_(False))
+    result = await session.execute(q)
     return result.scalar_one_or_none()
+
+
+async def get_all_registered_players(
+    session: AsyncSession,
+    limit: int = 100,
+) -> list[User]:
+    """Список активных игроков (зарегистрированы и не удалены) для админ-панели."""
+    result = await session.execute(
+        select(User)
+        .where(User.is_registered.is_(True), User.is_deleted.is_(False))
+        .order_by(User.game_nickname)
+        .limit(limit)
+    )
+    return list(result.scalars().all())
 
 
 async def get_or_create_user(

@@ -30,6 +30,7 @@ from db import (
     get_or_create_user,
     get_user_by_telegram_id,
     get_user_by_game_nickname,
+    get_all_registered_players,
     get_balance,
     transfer,
     get_last_transactions,
@@ -113,6 +114,17 @@ def _format_tx_time(dt: datetime) -> str:
     return dt.strftime("%d.%m.%Y %H:%M")
 
 
+def _format_players_list(players: list[User]) -> str:
+    """Компактный список игроков: игровое имя + №camp_id + баланс."""
+    if not players:
+        return "\n\nСписок игроков пуст."
+    lines = [
+        f"• {u.game_nickname or '—'} (№{u.cmap_id or '—'}) — {float(u.balance or 0):.2f} ₽"
+        for u in players
+    ]
+    return "\n\n<b>Список игроков:</b>\n" + "\n".join(lines)
+
+
 def admin_menu_keyboard() -> InlineKeyboardMarkup:
     kb = InlineKeyboardBuilder()
     kb.button(text="➕ Начислить", callback_data="admin_credit")
@@ -186,7 +198,7 @@ async def cmd_start(
             await session.commit()
 
     # Если пользователь не зарегистрирован — предлагаем регистрацию
-    if not user or not user.is_registered:
+    if not user or not user.is_active:
         await message.answer(
             "👋 Чтобы пользоваться ботом, нужно сначала зарегистрироваться.\n\n"
             "Нажмите кнопку ниже, чтобы начать регистрацию.",
@@ -202,8 +214,8 @@ async def cmd_start(
                 await message.answer("❌ Этот запрос на перевод недействителен или истёк.")
                 return
             requester = await session.get(User, pr.requester_id)
-            if not requester:
-                await message.answer("❌ Запрос недействителен.")
+            if not requester or not requester.is_active:
+                await message.answer("❌ Запрос недействителен или истёк.")
                 return
 
         # Запрос с конкретной суммой: показываем кто и сколько, кнопки Отправить/Отменить
@@ -518,8 +530,8 @@ async def on_pay_confirm(callback: CallbackQuery, state: FSMContext) -> None:
             username=callback.from_user.username,
         )
         recipient = await session.get(User, pr.requester_id)
-        if not recipient:
-            await callback.message.edit_text("❌ Получатель не найден.")
+        if not recipient or not recipient.is_active:
+            await callback.message.edit_text("❌ Получатель не найден или недоступен.")
             await state.clear()
             await callback.answer()
             return
@@ -623,8 +635,8 @@ async def on_pay_request_amount(message: Message, state: FSMContext) -> None:
             await state.clear()
             return
         recipient = await session.get(User, pr.requester_id)
-        if not recipient:
-            await message.answer("❌ Получатель больше не существует.")
+        if not recipient or not recipient.is_active:
+            await message.answer("❌ Получатель не найден или недоступен.")
             await state.clear()
             return
 
@@ -699,9 +711,16 @@ async def on_admin_credit(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(AdminStates.waiting_player)
     await state.update_data(admin_action="credit")
-    await callback.message.edit_text(
+    async with session_scope() as session:
+        players = await get_all_registered_players(session)
+        players_text = _format_players_list(players)
+    text = (
         "➕ <b>Начисление</b>\n\n"
-        "Введите <b>игровое имя</b> (никнейм) игрока:",
+        "Введите <b>игровое имя</b> (никнейм) игрока:"
+        f"{players_text}"
+    )
+    await callback.message.edit_text(
+        text,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="◀️ Отмена", callback_data="admin_back")]
@@ -716,9 +735,16 @@ async def on_admin_debit(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(AdminStates.waiting_player)
     await state.update_data(admin_action="debit")
-    await callback.message.edit_text(
+    async with session_scope() as session:
+        players = await get_all_registered_players(session)
+        players_text = _format_players_list(players)
+    text = (
         "➖ <b>Списание</b>\n\n"
-        "Введите <b>игровое имя</b> (никнейм) игрока:",
+        "Введите <b>игровое имя</b> (никнейм) игрока:"
+        f"{players_text}"
+    )
+    await callback.message.edit_text(
+        text,
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="◀️ Отмена", callback_data="admin_back")]
@@ -733,7 +759,7 @@ async def on_admin_back(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     async with session_scope() as session:
         user = await get_user_by_telegram_id(session, callback.from_user.id)
-        if not user or not user.is_registered:
+        if not user or not user.is_active:
             await callback.message.edit_text(
                 "👋 Чтобы пользоваться ботом, нужно сначала зарегистрироваться.",
                 reply_markup=registration_inline_keyboard(),
@@ -765,9 +791,9 @@ async def on_admin_player_input(message: Message, state: FSMContext) -> None:
                 "❌ Игрок не найден. Проверьте игровое имя."
             )
             return
-        if not target.is_registered:
+        if not target.is_active:
             await message.answer(
-                "❌ Этот пользователь ещё не завершил регистрацию."
+                "❌ Этот игрок не найден или удалён."
             )
             return
         target_id = target.id
