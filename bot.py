@@ -853,15 +853,37 @@ async def on_admin_confirm_yes(callback: CallbackQuery, state: FSMContext) -> No
             is_credit=is_credit,
         )
         target_name = _user_display_name(target)
+        target_tg_id = target.telegram_id
+        admin_name = _user_display_name(admin)
+        new_balance = await get_balance(session, target)  # type: ignore[arg-type]
+        target_menu_text = main_menu_text(target, new_balance)
+        target_is_admin = target.is_admin
     await state.clear()
     if action == "credit":
         await callback.message.edit_text(
             f"✅ Начислено <b>{amount:.2f} ₽</b> игроку <b>{target_name}</b>."
         )
+        notify_text = (
+            f"Админ <b>{admin_name}</b> начислил вам: <b>{amount:.2f} ₽</b>\n"
+            f"Текущий баланс: <b>{new_balance:.2f} ₽</b>"
+        )
     else:
         await callback.message.edit_text(
             f"✅ Списано <b>{amount:.2f} ₽</b> у игрока <b>{target_name}</b>."
         )
+        notify_text = (
+            f"Админ <b>{admin_name}</b> списал у вас: <b>{amount:.2f} ₽</b>\n"
+            f"Текущий баланс: <b>{new_balance:.2f} ₽</b>"
+        )
+    try:
+        await bot.send_message(chat_id=target_tg_id, text=notify_text)
+        await bot.send_message(
+            chat_id=target_tg_id,
+            text=target_menu_text,
+            reply_markup=main_menu_keyboard(is_admin=target_is_admin),
+        )
+    except Exception:
+        pass
     await callback.message.answer(
         "Админ-панель:",
         reply_markup=admin_menu_keyboard(),
